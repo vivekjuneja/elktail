@@ -7,29 +7,30 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/codegangsta/cli"
+	"golang.org/x/crypto/ssh/terminal"
 	"gopkg.in/olivere/elastic.v2"
 	"io/ioutil"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
-	"golang.org/x/crypto/ssh/terminal"
-	"github.com/codegangsta/cli"
-	"net/url"
-	"errors"
+	"strconv"
 )
 
 //
 // Structure that holds data necessary to perform tailing.
 //
 type Tail struct {
-	client           *elastic.Client  //elastic search client that we'll use to contact EL
-	queryDefinition  *QueryDefinition //structure containing query definition and formatting
-	indices          []string         //indices to search through
-	lastTimeStamp    string           //timestamp of the last result
-	lastIDs 		 []DisplayedEntry //result IDs that we fetched in the last query, used to avoid duplicates when using tailing query time window
-	order            bool			  //search order - true = ascending (may be reversed in case date-after filtering)
+	client          *elastic.Client  //elastic search client that we'll use to contact EL
+	queryDefinition *QueryDefinition //structure containing query definition and formatting
+	indices         []string         //indices to search through
+	lastTimeStamp   string           //timestamp of the last result
+	lastIDs         []DisplayedEntry //result IDs that we fetched in the last query, used to avoid duplicates when using tailing query time window
+	order           bool             //search order - true = ascending (may be reversed in case date-after filtering)
 }
 
 type DisplayedEntry struct {
@@ -43,6 +44,7 @@ func (entry *DisplayedEntry) isBefore(timeStamp string) bool {
 
 // Regexp for parsing out format fields
 var formatRegexp = regexp.MustCompile("%[A-Za-z0-9@_.-]+")
+
 const dateFormatDMY = "2006-01-02"
 const dateFormatFull = "2006-01-02T15:04:05.999Z07:00"
 const tailingTimeWindow = 500
@@ -53,7 +55,7 @@ func NewTail(configuration *Configuration) *Tail {
 
 	var client *elastic.Client
 	var err error
-	var url = configuration.SearchTarget.Url;
+	var url = configuration.SearchTarget.Url
 	if !strings.HasPrefix(url, "http") {
 		url = "http://" + url
 		Trace.Printf("Adding http:// prefix to given url. Url: " + url)
@@ -97,12 +99,23 @@ func NewTail(configuration *Configuration) *Tail {
 
 	tail.selectIndices(configuration)
 
-	//If we're date filtering on start date, then the sort needs to be ascending
-	if (configuration.QueryDefinition.AfterDateTime != "") {
-		tail.order = true //ascending
+	if configuration.QueryDefinition.SortOrder == "desc" {
+		tail.order = false
 	} else {
-		tail.order = false //descending
+		tail.order = true
 	}
+
+
+	//If we're date filtering on start date, then the sort needs to be ascending
+/*	if configuration.QueryDefinition.AfterDateTime != "" {
+		tail.order = true //ascending
+	} /*else {
+		tail.order = false //descending
+	}*/
+	
+	Trace.Printf("Requested Order : " + configuration.QueryDefinition.SortOrder)
+	Trace.Printf("Selected Order : " + strconv.FormatBool(tail.order))
+
 	return tail
 }
 
@@ -117,7 +130,7 @@ func (tail *Tail) selectIndices(configuration *Configuration) {
 	if configuration.QueryDefinition.IsDateTimeFiltered() {
 		startDate := configuration.QueryDefinition.AfterDateTime
 		endDate := configuration.QueryDefinition.BeforeDateTime
-		if (startDate == "" && endDate != "") {
+		if startDate == "" && endDate != "" {
 			lastIndex := findLastIndex(indices, configuration.SearchTarget.IndexPattern)
 			lastIndexDate := extractYMDDate(lastIndex, ".")
 			if lastIndexDate.Before(extractYMDDate(endDate, "-")) {
@@ -133,7 +146,7 @@ func (tail *Tail) selectIndices(configuration *Configuration) {
 
 	} else {
 		index := findLastIndex(indices, configuration.SearchTarget.IndexPattern)
-		result := [...]string { index }
+		result := [...]string{index}
 		tail.indices = result[:]
 	}
 	Info.Printf("Using indices: %s", tail.indices)
@@ -153,7 +166,7 @@ func (t *Tail) Start(follow bool, initialEntries int) {
 			//we can execute follow up timestamp filtered query only if we fetched at least 1 result in initial query
 			result, err = t.client.Search().
 				Indices(t.indices...).
-				Sort(t.queryDefinition.TimestampField, false).
+				Sort(t.queryDefinition.SortField, t.order).
 				From(0).
 				Size(9000). //TODO: needs rewrite this using scrolling, as this implementation may loose entries if there's more than 9K entries per sleep period
 				Query(t.buildTimestampFilteredQuery()).
@@ -180,13 +193,12 @@ func (t *Tail) Start(follow bool, initialEntries int) {
 // in order to fetch the timestamp which we will use in subsequent follow searches
 func (t *Tail) initialSearch(initialEntries int) (*elastic.SearchResult, error) {
 	return t.client.Search().
-	Indices(t.indices...).
-	Sort(t.queryDefinition.TimestampField, t.order).
-	Query(t.buildSearchQuery()).
-	From(0).Size(initialEntries).
-	Do()
+		Indices(t.indices...).
+		Sort("sequence", t.order).
+		Query(t.buildSearchQuery()).
+		From(0).Size(initialEntries).
+		Do()
 }
-
 
 // Process the results (e.g. prints them out based on configured format)
 func (t *Tail) processResults(searchResult *elastic.SearchResult) {
@@ -200,7 +212,7 @@ func (t *Tail) processResults(searchResult *elastic.SearchResult) {
 	// equal to last timestamp minus tailing time window. Since we are tracking IDs of entries form previous query,
 	// we can use the IDs to remove the duplicates. https://github.com/knes1/elktail/issues/11
 
-	if t.order {
+	if true { // t.order
 		for i := 0; i < len(hits); i++ {
 			hit := hits[i]
 			entry := t.processHit(hit)
@@ -208,10 +220,10 @@ func (t *Tail) processResults(searchResult *elastic.SearchResult) {
 			if timeStamp != t.lastTimeStamp {
 				t.lastTimeStamp = timeStamp
 			}
-			t.lastIDs = append(t.lastIDs, DisplayedEntry{ timeStamp: timeStamp, id: hit.Id })
+			t.lastIDs = append(t.lastIDs, DisplayedEntry{timeStamp: timeStamp, id: hit.Id})
 		}
 
-	} else { //when results are in descending order, we need to process them in reverse
+	} /*else { //when results are in descending order, we need to process them in reverse --- WHY ?
 		for i := len(hits) - 1; i >= 0; i-- {
 			hit := hits[i]
 			entry := t.processHit(hit)
@@ -219,9 +231,9 @@ func (t *Tail) processResults(searchResult *elastic.SearchResult) {
 			if timeStamp != t.lastTimeStamp {
 				t.lastTimeStamp = timeStamp
 			}
-			t.lastIDs = append(t.lastIDs, DisplayedEntry{ timeStamp: timeStamp, id: hit.Id })
+			t.lastIDs = append(t.lastIDs, DisplayedEntry{timeStamp: timeStamp, id: hit.Id})
 		}
-	}
+	}*/
 	cutoffTime := formatElasticTimeStamp(parseElasticTimeStamp(t.lastTimeStamp).Add(-tailingTimeWindow * time.Millisecond))
 	drainOldEntries(&t.lastIDs, cutoffTime)
 	//fmt.Print("------------------------------------------------\n")
@@ -230,20 +242,18 @@ func (t *Tail) processResults(searchResult *elastic.SearchResult) {
 	//Info.Printf("IDs: %v", t.lastIDs)
 }
 
-func parseElasticTimeStamp(elTimeStamp string) time.Time  {
+func parseElasticTimeStamp(elTimeStamp string) time.Time {
 	timeStr, _ := time.Parse(dateFormatFull, elTimeStamp)
 	return timeStr
 }
 
-func formatElasticTimeStamp(timeStamp time.Time) string  {
+func formatElasticTimeStamp(timeStamp time.Time) string {
 	return timeStamp.Format(dateFormatFull)
 }
 
-
-
 func drainOldEntries(entries *[]DisplayedEntry, cutOffTimestamp string) {
 	var i int
-	for i = 0; i < len(*entries) - 1 && (*entries)[i].timeStamp < cutOffTimestamp; i++ {
+	for i = 0; i < len(*entries)-1 && (*entries)[i].timeStamp < cutOffTimestamp; i++ {
 	}
 	*entries = (*entries)[i:]
 }
@@ -255,9 +265,8 @@ func (t *Tail) processHit(hit *elastic.SearchHit) map[string]interface{} {
 		Error.Fatalln("Failed parsing ElasticSearch response.", err)
 	}
 	t.printResult(entry)
-	return entry;
+	return entry
 }
-
 
 // Print result according to format
 func (t *Tail) printResult(entry map[string]interface{}) {
@@ -295,15 +304,15 @@ func (t *Tail) buildSearchQuery() elastic.Query {
 //in query definition
 func (t *Tail) buildDateTimeRangeFilter() elastic.RangeFilter {
 	filter := elastic.NewRangeFilter(t.queryDefinition.TimestampField)
-	if (t.queryDefinition.AfterDateTime != "") {
+	if t.queryDefinition.AfterDateTime != "" {
 		Trace.Printf("Date range query - timestamp after: %s", t.queryDefinition.AfterDateTime)
 		filter = filter.IncludeLower(true).
-			   From(t.queryDefinition.AfterDateTime)
+			From(t.queryDefinition.AfterDateTime)
 	}
-	if (t.queryDefinition.BeforeDateTime != "") {
+	if t.queryDefinition.BeforeDateTime != "" {
 		Trace.Printf("Date range query - timestamp before: %s", t.queryDefinition.BeforeDateTime)
 		filter = filter.IncludeUpper(false).
-		       To(t.queryDefinition.BeforeDateTime)
+			To(t.queryDefinition.BeforeDateTime)
 	}
 	return filter
 }
@@ -312,7 +321,7 @@ func (t *Tail) buildTimestampFilteredQuery() elastic.Query {
 	timeStamp := formatElasticTimeStamp(parseElasticTimeStamp(t.lastTimeStamp).Add(-tailingTimeWindow * time.Millisecond))
 
 	timeStampFilter := elastic.NewRangeFilter(t.queryDefinition.TimestampField).
-			Gte(timeStamp)
+		Gte(timeStamp)
 
 	idsToFilter := make([]string, len(t.lastIDs))
 	for i := range t.lastIDs {
@@ -342,10 +351,9 @@ func extractYMDDate(dateStr, separator string) time.Time {
 	return parsed
 }
 
-
 func findIndicesForDateRange(indices []string, indexPattern string, startDate string, endDate string) []string {
-	start := extractYMDDate(startDate , "-")
-	end := extractYMDDate(endDate , "-")
+	start := extractYMDDate(startDate, "-")
+	end := extractYMDDate(endDate, "-")
 	result := make([]string, 0, len(indices))
 	for _, idx := range indices {
 		matched, _ := regexp.MatchString(indexPattern, idx)
@@ -354,11 +362,10 @@ func findIndicesForDateRange(indices []string, indexPattern string, startDate st
 			if (idxDate.After(start) || idxDate.Equal(start)) && (idxDate.Before(end) || idxDate.Equal(end)) {
 				result = append(result, idx)
 			}
- 		}
+		}
 	}
 	return result
 }
-
 
 func findLastIndex(indices []string, indexPattern string) string {
 	var lastIdx string
@@ -428,7 +435,7 @@ func main() {
 		if config.SSHTunnelParams != "" {
 			//We need to start ssh tunnel and make el client connect to local port at localhost in order to pass
 			//traffic through the tunnel
-			elurl, err := url.Parse(config.SearchTarget.Url);
+			elurl, err := url.Parse(config.SearchTarget.Url)
 			if err != nil {
 				Error.Fatalf("Failed to parse hostname/port from given URL: %s\n", config.SearchTarget.Url)
 			}
@@ -446,7 +453,6 @@ func main() {
 		}
 
 		var configToSave *Configuration
-
 
 		args := c.Args()
 
@@ -487,7 +493,7 @@ func main() {
 // Helper function to avoid boilerplate error handling for regex matches
 // this way they may be used in single value context
 func Must(result bool, err error) bool {
-	if  err != nil {
+	if err != nil {
 		Error.Panic(err)
 	}
 	return result
@@ -502,7 +508,6 @@ func readPasswd() string {
 	fmt.Println()
 	return string(bytePassword)
 }
-
 
 // Expression evaluation function. It uses map as a model and evaluates expression given as
 // the parameter using dot syntax:

@@ -22,6 +22,8 @@ type SearchTarget struct {
 type QueryDefinition struct {
 	Terms          []string
 	Format         string
+	SortField 	   string
+	SortOrder	   string 
 	TimestampField string
 	AfterDateTime  string  `json:"-"`
 	BeforeDateTime string  `json:"-"`
@@ -76,6 +78,8 @@ func (c *Configuration) CopyConfigRelevantSettingsTo(dest *Configuration) {
 	dest.SearchTarget.Url = c.SearchTarget.Url
 	dest.SearchTarget.IndexPattern = c.SearchTarget.IndexPattern
 	dest.QueryDefinition.Format = c.QueryDefinition.Format
+	dest.QueryDefinition.SortField = c.QueryDefinition.SortField
+	dest.QueryDefinition.SortOrder = c.QueryDefinition.SortOrder
 	dest.QueryDefinition.Terms = make([]string, len(c.QueryDefinition.Terms))
 	copy(dest.QueryDefinition.Terms, c.QueryDefinition.Terms)
 	dest.User = c.User
@@ -158,6 +162,18 @@ func (config *Configuration) Flags() []cli.Flag {
 			Value:       "%message",
 			Usage:       "(*) Message format for the entries - field names are referenced using % sign, for example '%@timestamp %message'",
 			Destination: &config.QueryDefinition.Format,
+		},
+		cli.StringFlag{
+			Name:        "o,sortfield",
+			Value:       "@timestamp",
+			Usage:       "(*) Field to sort the results - i.e. field name, for example 'id' OR 'sequence'. Default is '@timestamp'",
+			Destination: &config.QueryDefinition.SortField,
+		},
+		cli.StringFlag{
+			Name:        "r,sortorder",
+			Value:       "desc",
+			Usage:       "(*) Sort Order for the results - for example 'asc' OR 'desc'. Default is 'desc'",
+			Destination: &config.QueryDefinition.SortOrder,
 		},
 		cli.StringFlag{
 			Name:        "i,index-pattern",
