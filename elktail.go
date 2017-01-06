@@ -16,9 +16,9 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
-	"strconv"
 )
 
 //
@@ -105,14 +105,13 @@ func NewTail(configuration *Configuration) *Tail {
 		tail.order = true
 	}
 
-
 	//If we're date filtering on start date, then the sort needs to be ascending
-/*	if configuration.QueryDefinition.AfterDateTime != "" {
-		tail.order = true //ascending
-	} /*else {
-		tail.order = false //descending
-	}*/
-	
+	/*	if configuration.QueryDefinition.AfterDateTime != "" {
+			tail.order = true //ascending
+		} /*else {
+			tail.order = false //descending
+		}*/
+
 	Trace.Printf("Requested Order : " + configuration.QueryDefinition.SortOrder)
 	Trace.Printf("Selected Order : " + strconv.FormatBool(tail.order))
 
@@ -194,7 +193,7 @@ func (t *Tail) Start(follow bool, initialEntries int) {
 func (t *Tail) initialSearch(initialEntries int) (*elastic.SearchResult, error) {
 	return t.client.Search().
 		Indices(t.indices...).
-		Sort("sequence", t.order).
+		Sort(t.queryDefinition.SortField, t.order).
 		Query(t.buildSearchQuery()).
 		From(0).Size(initialEntries).
 		Do()
